@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 #
 # Copyright 2014 Facebook
 #
@@ -13,12 +12,10 @@
 # WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 # License for the specific language governing permissions and limitations
 # under the License.
-
-from __future__ import absolute_import, division, print_function
-
 from contextlib import closing
 import os
 import socket
+import unittest
 
 from tornado.concurrent import Future
 from tornado.netutil import bind_sockets, Resolver
@@ -26,7 +23,7 @@ from tornado.queues import Queue
 from tornado.tcpclient import TCPClient, _Connector
 from tornado.tcpserver import TCPServer
 from tornado.testing import AsyncTestCase, gen_test
-from tornado.test.util import skipIfNoIPv6, unittest, refusing_port, skipIfNonUnix, skipOnTravis
+from tornado.test.util import skipIfNoIPv6, refusing_port, skipIfNonUnix
 from tornado.gen import TimeoutError
 
 # Fake address families for testing.  Used in place of AF_INET
@@ -78,8 +75,7 @@ class TCPClientTest(AsyncTestCase):
     def skipIfLocalhostV4(self):
         # The port used here doesn't matter, but some systems require it
         # to be non-zero if we do not also pass AI_PASSIVE.
-        Resolver().resolve('localhost', 80, callback=self.stop)
-        addrinfo = self.wait()
+        addrinfo = self.io_loop.run_sync(lambda: Resolver().resolve('localhost', 80))
         families = set(addr[0] for addr in addrinfo)
         if socket.AF_INET6 not in families:
             self.skipTest("localhost does not resolve to ipv6")
@@ -230,6 +226,9 @@ class ConnectorTest(AsyncTestCase):
         else:
             self.streams.pop(addr)
             future.set_exception(IOError())
+        # Run the loop to allow callbacks to be run.
+        self.io_loop.add_callback(self.stop)
+        self.wait()
 
     def assert_connector_streams_closed(self, conn):
         for stream in conn.streams:

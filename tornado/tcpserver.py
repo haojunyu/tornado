@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 #
 # Copyright 2011 Facebook
 #
@@ -15,11 +14,11 @@
 # under the License.
 
 """A non-blocking, single-threaded TCP server."""
-from __future__ import absolute_import, division, print_function
 
 import errno
 import os
 import socket
+import ssl
 
 from tornado import gen
 from tornado.log import app_log
@@ -28,12 +27,6 @@ from tornado.iostream import IOStream, SSLIOStream
 from tornado.netutil import bind_sockets, add_accept_handler, ssl_wrap_socket
 from tornado import process
 from tornado.util import errno_from_exception
-
-try:
-    import ssl
-except ImportError:
-    # ssl is not available on Google App Engine.
-    ssl = None
 
 
 class TCPServer(object):
@@ -47,12 +40,11 @@ class TCPServer(object):
       from tornado import gen
 
       class EchoServer(TCPServer):
-          @gen.coroutine
-          def handle_stream(self, stream, address):
+          async def handle_stream(self, stream, address):
               while True:
                   try:
-                      data = yield stream.read_until(b"\n")
-                      yield stream.write(data)
+                      data = await stream.read_until(b"\n")
+                      await stream.write(data)
                   except StreamClosedError:
                       break
 
@@ -108,7 +100,6 @@ class TCPServer(object):
     """
     def __init__(self, ssl_options=None, max_buffer_size=None,
                  read_chunk_size=None):
-        self.io_loop = IOLoop.current()
         self.ssl_options = ssl_options
         self._sockets = {}   # fd -> socket object
         self._handlers = {}  # fd -> remove_handler callable
@@ -296,7 +287,7 @@ class TCPServer(object):
 
             future = self.handle_stream(stream, address)
             if future is not None:
-                self.io_loop.add_future(gen.convert_yielded(future),
-                                        lambda f: f.result())
+                IOLoop.current().add_future(gen.convert_yielded(future),
+                                            lambda f: f.result())
         except Exception:
             app_log.error("Error in connection callback", exc_info=True)

@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 #
 # Copyright 2012 Facebook
 #
@@ -28,8 +27,6 @@ These streams may be configured independently using the standard library's
 `logging` module.  For example, you may wish to send ``tornado.access`` logs
 to a separate file for analysis.
 """
-from __future__ import absolute_import, division, print_function
-
 import logging
 import logging.handlers
 import sys
@@ -38,14 +35,14 @@ from tornado.escape import _unicode
 from tornado.util import unicode_type, basestring_type
 
 try:
-    import colorama
+    import colorama  # type: ignore
 except ImportError:
     colorama = None
 
 try:
     import curses  # type: ignore
 except ImportError:
-    curses = None
+    curses = None  # type: ignore
 
 # Logger objects for internal tornado use
 access_log = logging.getLogger("tornado.access")
@@ -102,7 +99,8 @@ class LogFormatter(logging.Formatter):
        Added support for ``colorama``. Changed the constructor
        signature to be compatible with `logging.config.dictConfig`.
     """
-    DEFAULT_FORMAT = '%(color)s[%(levelname)1.1s %(asctime)s %(module)s:%(lineno)d]%(end_color)s %(message)s'
+    DEFAULT_FORMAT = \
+        '%(color)s[%(levelname)1.1s %(asctime)s %(module)s:%(lineno)d]%(end_color)s %(message)s'
     DEFAULT_DATE_FORMAT = '%y%m%d %H:%M:%S'
     DEFAULT_COLORS = {
         logging.DEBUG: 4,  # Blue
@@ -115,13 +113,13 @@ class LogFormatter(logging.Formatter):
                  style='%', color=True, colors=DEFAULT_COLORS):
         r"""
         :arg bool color: Enables color support.
-        :arg string fmt: Log message format.
+        :arg str fmt: Log message format.
           It will be applied to the attributes dict of log records. The
           text between ``%(color)s`` and ``%(end_color)s`` will be colored
           depending on the level if color support is on.
         :arg dict colors: color mappings from logging level to terminal color
           code
-        :arg string datefmt: Datetime format.
+        :arg str datefmt: Datetime format.
           Used for formatting ``(asctime)`` placeholder in ``prefix_fmt``.
 
         .. versionchanged:: 3.2

@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 #
 # Copyright 2009 Facebook
 #
@@ -25,8 +24,6 @@ class except to start a server at the beginning of the process
    The ``HTTPRequest`` class that used to live in this module has been moved
    to `tornado.httputil.HTTPServerRequest`.  The old name remains as an alias.
 """
-
-from __future__ import absolute_import, division, print_function
 
 import socket
 
@@ -287,6 +284,10 @@ class _HTTPRequestContext(object):
         proto_header = headers.get(
             "X-Scheme", headers.get("X-Forwarded-Proto",
                                     self.protocol))
+        if proto_header:
+            # use only the last proto entry if there is more than one
+            # TODO: support trusting mutiple layers of proxied protocol
+            proto_header = proto_header.split(',')[-1].strip()
         if proto_header in ("http", "https"):
             self.protocol = proto_header
 

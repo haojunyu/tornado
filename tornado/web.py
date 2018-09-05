@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 #
 # Copyright 2009 Facebook
 #
@@ -47,16 +46,16 @@ Thread-safety notes
 -------------------
 
 In general, methods on `RequestHandler` and elsewhere in Tornado are
-not thread-safe.  In particular, methods such as
+not thread-safe. In particular, methods such as
 `~RequestHandler.write()`, `~RequestHandler.finish()`, and
-`~RequestHandler.flush()` must only be called from the main thread.  If
+`~RequestHandler.flush()` must only be called from the main thread. If
 you use multiple threads it is important to use `.IOLoop.add_callback`
 to transfer control back to the main thread before finishing the
-request.
+request, or to limit your use of other threads to
+`.IOLoop.run_in_executor` and ensure that your callbacks running in
+the executor do not refer to Tornado objects.
 
 """
-
-from __future__ import absolute_import, division, print_function
 
 import base64
 import binascii
@@ -66,6 +65,9 @@ import functools
 import gzip
 import hashlib
 import hmac
+import http.cookies
+from inspect import isclass
+from io import BytesIO
 import mimetypes
 import numbers
 import os.path
@@ -77,35 +79,25 @@ import time
 import tornado
 import traceback
 import types
-from inspect import isclass
-from io import BytesIO
+import urllib.parse
+from urllib.parse import urlencode
 
-from tornado.concurrent import Future
+from tornado.concurrent import Future, future_set_result_unless_cancelled
 from tornado import escape
 from tornado import gen
+from tornado.httpserver import HTTPServer
 from tornado import httputil
 from tornado import iostream
 from tornado import locale
 from tornado.log import access_log, app_log, gen_log
-from tornado import stack_context
 from tornado import template
 from tornado.escape import utf8, _unicode
 from tornado.routing import (AnyMatches, DefaultHostMatches, HostMatches,
                              ReversibleRouter, Rule, ReversibleRuleRouter,
                              URLSpec)
-from tornado.util import (ObjectDict, raise_exc_info,
-                          unicode_type, _websocket_mask, PY3)
+from tornado.util import ObjectDict, unicode_type, _websocket_mask
 
 url = URLSpec
-
-if PY3:
-    import http.cookies as Cookie
-    import urllib.parse as urlparse
-    from urllib.parse import urlencode
-else:
-    import Cookie
-    import urlparse
-    from urllib import urlencode
 
 try:
     import typing  # noqa
@@ -245,8 +237,7 @@ class RequestHandler(object):
         of the request method.
 
         Asynchronous support: Decorate this method with `.gen.coroutine`
-        or `.return_future` to make it asynchronous (the
-        `asynchronous` decorator cannot be used on `prepare`).
+        or use ``async def`` to make it asynchronous.
         If this method returns a `.Future` execution will not proceed
         until the `.Future` is done.
 
@@ -309,11 +300,15 @@ class RequestHandler(object):
     def set_status(self, status_code, reason=None):
         """Sets the status code for our response.
 
-        :arg int status_code: Response status code. If ``reason`` is ``None``,
-            it must be present in `httplib.responses <http.client.responses>`.
-        :arg string reason: Human-readable reason phrase describing the status
+        :arg int status_code: Response status code.
+        :arg str reason: Human-readable reason phrase describing the status
             code. If ``None``, it will be filled in from
-            `httplib.responses <http.client.responses>`.
+            `http.client.responses` or "Unknown".
+
+        .. versionchanged:: 5.0
+
+           No longer validates that the response code is in
+           `http.client.responses`.
         """
         self._status_code = status_code
         if reason is not None:
@@ -537,6 +532,10 @@ class RequestHandler(object):
         Newly-set cookies are not immediately visible via `get_cookie`;
         they are not present until the next request.
 
+        expires may be a numeric timestamp as returned by `time.time`,
+        a time tuple as returned by `time.gmtime`, or a
+        `datetime.datetime` object.
+
         Additional keyword arguments are set on the cookies.Morsel
         directly.
         See https://docs.python.org/3/library/http.cookies.html#http.cookies.Morsel
@@ -549,7 +548,7 @@ class RequestHandler(object):
             # Don't let us accidentally inject bad stuff
             raise ValueError("Invalid cookie %r: %r" % (name, value))
         if not hasattr(self, "_new_cookie"):
-            self._new_cookie = Cookie.SimpleCookie()
+            self._new_cookie = http.cookies.SimpleCookie()
         if name in self._new_cookie:
             del self._new_cookie[name]
         self._new_cookie[name] = value
@@ -729,7 +728,8 @@ class RequestHandler(object):
         if not isinstance(chunk, (bytes, unicode_type, dict)):
             message = "write() only accepts bytes, unicode, and dict objects"
             if isinstance(chunk, list):
-                message += ". Lists not accepted for security reasons; see http://www.tornadoweb.org/en/stable/web.html#tornado.web.RequestHandler.write"
+                message += ". Lists not accepted for security reasons; see " + \
+                    "http://www.tornadoweb.org/en/stable/web.html#tornado.web.RequestHandler.write"
             raise TypeError(message)
         if isinstance(chunk, dict):
             chunk = escape.json_encode(chunk)
@@ -738,7 +738,18 @@ class RequestHandler(object):
         self._write_buffer.append(chunk)
 
     def render(self, template_name, **kwargs):
-        """Renders the template with the given arguments as the response."""
+        """Renders the template with the given arguments as the response.
+
+        ``render()`` calls ``finish()``, so no other output methods can be called
+        after it.
+
+        Returns a `.Future` with the same semantics as the one returned by `finish`.
+        Awaiting this `.Future` is optional.
+
+        .. versionchanged:: 5.1
+
+           Now returns a `.Future` instead of ``None``.
+        """
         if self._finished:
             raise RuntimeError("Cannot render() after finish()")
         html = self.render_string(template_name, **kwargs)
@@ -799,7 +810,7 @@ class RequestHandler(object):
         if html_bodies:
             hloc = html.index(b'</body>')
             html = html[:hloc] + b''.join(html_bodies) + b'\n' + html[hloc:]
-        self.finish(html)
+        return self.finish(html)
 
     def render_linked_js(self, js_files):
         """Default method used to render the final js links for the
@@ -928,7 +939,7 @@ class RequestHandler(object):
             kwargs["whitespace"] = settings["template_whitespace"]
         return template.Loader(template_path, **kwargs)
 
-    def flush(self, include_footers=False, callback=None):
+    def flush(self, include_footers=False):
         """Flushes the current output buffer to the network.
 
         The ``callback`` argument, if given, can be used for flow control:
@@ -939,6 +950,10 @@ class RequestHandler(object):
 
         .. versionchanged:: 4.0
            Now returns a `.Future` if no callback is given.
+
+        .. versionchanged:: 6.0
+
+           The ``callback`` argument was removed.
         """
         chunk = b"".join(self._write_buffer)
         self._write_buffer = []
@@ -964,20 +979,33 @@ class RequestHandler(object):
                                                     self._status_code,
                                                     self._reason)
             return self.request.connection.write_headers(
-                start_line, self._headers, chunk, callback=callback)
+                start_line, self._headers, chunk)
         else:
             for transform in self._transforms:
                 chunk = transform.transform_chunk(chunk, include_footers)
             # Ignore the chunk and only write the headers for HEAD requests
             if self.request.method != "HEAD":
-                return self.request.connection.write(chunk, callback=callback)
+                return self.request.connection.write(chunk)
             else:
                 future = Future()
                 future.set_result(None)
                 return future
 
     def finish(self, chunk=None):
-        """Finishes this response, ending the HTTP request."""
+        """Finishes this response, ending the HTTP request.
+
+        Passing a ``chunk`` to ``finish()`` is equivalent to passing that
+        chunk to ``write()`` and then calling ``finish()`` with no arguments.
+
+        Returns a `.Future` which may optionally be awaited to track the sending
+        of the response to the client. This `.Future` resolves when all the response
+        data has been sent, and raises an error if the connection is closed before all
+        data can be sent.
+
+        .. versionchanged:: 5.1
+
+           Now returns a `.Future` instead of ``None``.
+        """
         if self._finished:
             raise RuntimeError("finish() called twice")
 
@@ -995,7 +1023,7 @@ class RequestHandler(object):
                     self._write_buffer = []
                     self.set_status(304)
             if (self._status_code in (204, 304) or
-                (self._status_code >= 100 and self._status_code < 200)):
+                    (self._status_code >= 100 and self._status_code < 200)):
                 assert not self._write_buffer, "Cannot send body with %s" % self._status_code
                 self._clear_headers_for_304()
             elif "Content-Length" not in self._headers:
@@ -1009,12 +1037,27 @@ class RequestHandler(object):
             # are keepalive connections)
             self.request.connection.set_close_callback(None)
 
-        self.flush(include_footers=True)
-        self.request.finish()
+        future = self.flush(include_footers=True)
+        self.request.connection.finish()
         self._log()
         self._finished = True
         self.on_finish()
         self._break_cycles()
+        return future
+
+    def detach(self):
+        """Take control of the underlying stream.
+
+        Returns the underlying `.IOStream` object and stops all
+        further HTTP processing. Intended for implementing protocols
+        like websockets that tunnel over an HTTP handshake.
+
+        This method is only supported when HTTP/1.1 is used.
+
+        .. versionadded:: 5.1
+        """
+        self._finished = True
+        return self.request.connection.detach()
 
     def _break_cycles(self):
         # Break up a reference cycle between this handler and the
@@ -1215,6 +1258,11 @@ class RequestHandler(object):
         as a potential forgery.
 
         See http://en.wikipedia.org/wiki/Cross-site_request_forgery
+
+        This property is of type `bytes`, but it contains only ASCII
+        characters. If a character string is required, there is no
+        need to base64-encode it; just decode the byte string as
+        UTF-8.
 
         .. versionchanged:: 3.2.2
            The xsrf token will now be have a random mask applied in every
@@ -1479,17 +1527,6 @@ class RequestHandler(object):
                     break
         return match
 
-    def _stack_context_handle_exception(self, type, value, traceback):
-        try:
-            # For historical reasons _handle_request_exception only takes
-            # the exception value instead of the full triple,
-            # so re-raise the exception to ensure that it's in
-            # sys.exc_info()
-            raise_exc_info((type, value, traceback))
-        except Exception:
-            self._handle_request_exception(value)
-        return True
-
     @gen.coroutine
     def _execute(self, transforms, *args, **kwargs):
         """Executes this request with the given output transforms."""
@@ -1512,7 +1549,7 @@ class RequestHandler(object):
             if self._prepared_future is not None:
                 # Tell the Application we've finished with prepare()
                 # and are ready for the body to arrive.
-                self._prepared_future.set_result(None)
+                future_set_result_unless_cancelled(self._prepared_future, None)
             if self._finished:
                 return
 
@@ -1537,6 +1574,9 @@ class RequestHandler(object):
                 self._handle_request_exception(e)
             except Exception:
                 app_log.error("Exception in exception handler", exc_info=True)
+            finally:
+                # Unset result to avoid circular references
+                result = None
             if (self._prepared_future is not None and
                     not self._prepared_future.done()):
                 # In case we failed before setting _prepared_future, do it
@@ -1631,83 +1671,6 @@ class RequestHandler(object):
             self.clear_header(h)
 
 
-def asynchronous(method):
-    """Wrap request handler methods with this if they are asynchronous.
-
-    This decorator is for callback-style asynchronous methods; for
-    coroutines, use the ``@gen.coroutine`` decorator without
-    ``@asynchronous``. (It is legal for legacy reasons to use the two
-    decorators together provided ``@asynchronous`` is first, but
-    ``@asynchronous`` will be ignored in this case)
-
-    This decorator should only be applied to the :ref:`HTTP verb
-    methods <verbs>`; its behavior is undefined for any other method.
-    This decorator does not *make* a method asynchronous; it tells
-    the framework that the method *is* asynchronous.  For this decorator
-    to be useful the method must (at least sometimes) do something
-    asynchronous.
-
-    If this decorator is given, the response is not finished when the
-    method returns. It is up to the request handler to call
-    `self.finish() <RequestHandler.finish>` to finish the HTTP
-    request. Without this decorator, the request is automatically
-    finished when the ``get()`` or ``post()`` method returns. Example:
-
-    .. testcode::
-
-       class MyRequestHandler(RequestHandler):
-           @asynchronous
-           def get(self):
-              http = httpclient.AsyncHTTPClient()
-              http.fetch("http://friendfeed.com/", self._on_download)
-
-           def _on_download(self, response):
-              self.write("Downloaded!")
-              self.finish()
-
-    .. testoutput::
-       :hide:
-
-    .. versionchanged:: 3.1
-       The ability to use ``@gen.coroutine`` without ``@asynchronous``.
-
-    .. versionchanged:: 4.3 Returning anything but ``None`` or a
-       yieldable object from a method decorated with ``@asynchronous``
-       is an error. Such return values were previously ignored silently.
-    """
-    # Delay the IOLoop import because it's not available on app engine.
-    from tornado.ioloop import IOLoop
-
-    @functools.wraps(method)
-    def wrapper(self, *args, **kwargs):
-        self._auto_finish = False
-        with stack_context.ExceptionStackContext(
-                self._stack_context_handle_exception):
-            result = method(self, *args, **kwargs)
-            if result is not None:
-                result = gen.convert_yielded(result)
-
-                # If @asynchronous is used with @gen.coroutine, (but
-                # not @gen.engine), we can automatically finish the
-                # request when the future resolves.  Additionally,
-                # the Future will swallow any exceptions so we need
-                # to throw them back out to the stack context to finish
-                # the request.
-                def future_complete(f):
-                    f.result()
-                    if not self._finished:
-                        self.finish()
-                IOLoop.current().add_future(result, future_complete)
-                # Once we have done this, hide the Future from our
-                # caller (i.e. RequestHandler._when_complete), which
-                # would otherwise set up its own callback and
-                # exception handler (resulting in exceptions being
-                # logged twice).
-                return None
-            return result
-    return wrapper
-
-
 def stream_request_body(cls):
     """Apply to `RequestHandler` subclasses to enable streaming body support.
 
@@ -1728,7 +1691,7 @@ def stream_request_body(cls):
 
     See the `file receiver demo <https://github.com/tornadoweb/tornado/tree/master/demos/file_upload/>`_
     for example usage.
-    """
+    """  # noqa: E501
     if not issubclass(cls, RequestHandler):
         raise TypeError("expected subclass of RequestHandler, got %r", cls)
     cls._stream_request_body = True
@@ -1876,6 +1839,17 @@ class Application(ReversibleRouter):
     If there's no match for the current request's host, then ``default_host``
     parameter value is matched against host regular expressions.
 
+
+    .. warning::
+
+       Applications that do not use TLS may be vulnerable to :ref:`DNS
+       rebinding <dnsrebinding>` attacks. This attack is especially
+       relevant to applications that only listen on ``127.0.0.1` or
+       other private networks. Appropriate host patterns must be used
+       (instead of the default of ``r'.*'``) to prevent this risk. The
+       ``default_host`` argument must not be used in applications that
+       may be vulnerable to DNS rebinding.
+
     You can serve static files by sending the ``static_path`` setting
     as a keyword argument. We will serve those files from the
     ``/static/`` URI (this is configurable with the
@@ -1886,6 +1860,7 @@ class Application(ReversibleRouter):
 
     .. versionchanged:: 4.5
        Integration with the new `tornado.routing` module.
+
     """
     def __init__(self, handlers=None, default_host=None, transforms=None,
                  **settings):
@@ -1953,9 +1928,6 @@ class Application(ReversibleRouter):
         .. versionchanged:: 4.3
            Now returns the `.HTTPServer` object.
         """
-        # import is here rather than top level because HTTPServer
-        # is not importable on appengine
-        from tornado.httpserver import HTTPServer
         server = HTTPServer(self, **kwargs)
         server.listen(port, address)
         return server
@@ -2106,7 +2078,7 @@ class _HandlerDelegate(httputil.HTTPMessageDelegate):
 
     def finish(self):
         if self.stream_request_body:
-            self.request.body.set_result(None)
+            future_set_result_unless_cancelled(self.request.body, None)
         else:
             self.request.body = b''.join(self.chunks)
             self.request._parse_body()
@@ -2163,11 +2135,11 @@ class HTTPError(Exception):
     :arg int status_code: HTTP status code.  Must be listed in
         `httplib.responses <http.client.responses>` unless the ``reason``
         keyword argument is given.
-    :arg string log_message: Message to be written to the log for this error
+    :arg str log_message: Message to be written to the log for this error
         (will not be shown to the user unless the `Application` is in debug
         mode).  May contain ``%s``-style placeholders, which will be filled
         in with remaining positional parameters.
-    :arg string reason: Keyword-only argument.  The HTTP "reason" phrase
+    :arg str reason: Keyword-only argument.  The HTTP "reason" phrase
         to pass in the status line along with ``status_code``.  Normally
         determined automatically from ``status_code``, but can be used
         to use a non-standard numeric code.
@@ -2273,6 +2245,10 @@ class RedirectHandler(RequestHandler):
 
     .. versionchanged:: 4.5
        Added support for substitutions into the destination URL.
+
+    .. versionchanged:: 5.0
+       If any query arguments are present, they will be copied to the
+       destination URL.
     """
     def initialize(self, url, permanent=True):
         self._url = url
@@ -2488,8 +2464,9 @@ class StaticFileHandler(RequestHandler):
 
         .. versionadded:: 3.1
         """
-        if self.check_etag_header():
-            return True
+        # If client sent If-None-Match, use it, ignore If-Modified-Since
+        if self.request.headers.get('If-None-Match'):
+            return self.check_etag_header()
 
         # Check the If-Modified-Since, and don't send the result if the
         # content has not been modified
@@ -2794,6 +2771,7 @@ class FallbackHandler(RequestHandler):
     def prepare(self):
         self.fallback(self.request)
         self._finished = True
+        self.on_finish()
 
 
 class OutputTransform(object):
@@ -2807,7 +2785,7 @@ class OutputTransform(object):
         pass
 
     def transform_first_chunk(self, status_code, headers, chunk, finishing):
-        # type: (int, httputil.HTTPHeaders, bytes, bool) -> typing.Tuple[int, httputil.HTTPHeaders, bytes]
+        # type: (int, httputil.HTTPHeaders, bytes, bool) -> typing.Tuple[int, httputil.HTTPHeaders, bytes] # noqa: E501
         return status_code, headers, chunk
 
     def transform_chunk(self, chunk, finishing):
@@ -2848,7 +2826,7 @@ class GZipContentEncoding(OutputTransform):
         return ctype.startswith('text/') or ctype in self.CONTENT_TYPES
 
     def transform_first_chunk(self, status_code, headers, chunk, finishing):
-        # type: (int, httputil.HTTPHeaders, bytes, bool) -> typing.Tuple[int, httputil.HTTPHeaders, bytes]
+        # type: (int, httputil.HTTPHeaders, bytes, bool) -> typing.Tuple[int, httputil.HTTPHeaders, bytes] # noqa: E501
         # TODO: can/should this type be inherited from the superclass?
         if 'Vary' in headers:
             headers['Vary'] += ', Accept-Encoding'
@@ -2906,7 +2884,7 @@ def authenticated(method):
             if self.request.method in ("GET", "HEAD"):
                 url = self.get_login_url()
                 if "?" not in url:
-                    if urlparse.urlsplit(url).scheme:
+                    if urllib.parse.urlsplit(url).scheme:
                         # if login url is absolute, make next absolute too
                         next_url = self.request.full_url()
                     else:

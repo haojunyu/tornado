@@ -1,13 +1,10 @@
-from __future__ import absolute_import, division, print_function
-
 import os
-import sys
 import traceback
+import unittest
 
 from tornado.escape import utf8, native_str, to_unicode
 from tornado.template import Template, DictLoader, ParseError, Loader
-from tornado.test.util import unittest, is_coverage_running
-from tornado.util import ObjectDict, unicode_type, PY3
+from tornado.util import ObjectDict
 
 
 class TemplateTest(unittest.TestCase):
@@ -80,12 +77,7 @@ class TemplateTest(unittest.TestCase):
         # test simulates unicode characters appearing directly in the
         # template file (with utf8 encoding), i.e. \u escapes would not
         # be used in the template file itself.
-        if str is unicode_type:
-            # python 3 needs a different version of this test since
-            # 2to3 doesn't run on template internals
-            template = Template(utf8(u'{{ "\u00e9" }}'))
-        else:
-            template = Template(utf8(u'{{ u"\u00e9" }}'))
+        template = Template(utf8(u'{{ "\u00e9" }}'))
         self.assertEqual(template.generate(), utf8(u"\u00e9"))
 
     def test_custom_namespace(self):
@@ -165,9 +157,12 @@ try{% set y = 1/x %}
         except ParseError:
             pass
 
-    @unittest.skipIf(sys.version_info >= division.getMandatoryRelease(),
-                     'no testable future imports')
+    @unittest.skip('no testable future imports')
     def test_no_inherit_future(self):
+        # TODO(bdarnell): make a test like this for one of the future
+        # imports available in python 3. Unfortunately they're harder
+        # to use in a template than division was.
+
         # This file has from __future__ import division...
         self.assertEqual(1 / 2, 0.5)
         # ...but the template doesn't
@@ -175,11 +170,6 @@ try{% set y = 1/x %}
         self.assertEqual(template.generate(), '0')
 
     def test_non_ascii_name(self):
-        if PY3 and is_coverage_running():
-            try:
-                os.fsencode(u"t\u00e9st.html")
-            except UnicodeEncodeError:
-                self.skipTest("coverage tries to access unencodable filename")
         loader = DictLoader({u"t\u00e9st.html": "hello"})
         self.assertEqual(loader.load(u"t\u00e9st.html").generate(), b"hello")
 
@@ -208,10 +198,15 @@ three{%end%}
             self.assertTrue("# test.html:2" in traceback.format_exc())
 
     def test_error_line_number_module(self):
+        loader = None
+
+        def load_generate(path, **kwargs):
+            return loader.load(path).generate(**kwargs)
+
         loader = DictLoader({
             "base.html": "{% module Template('sub.html') %}",
             "sub.html": "{{1/0}}",
-        }, namespace={"_tt_modules": ObjectDict(Template=lambda path, **kwargs: loader.load(path).generate(**kwargs))})
+        }, namespace={"_tt_modules": ObjectDict(Template=load_generate)})
         try:
             loader.load("base.html").generate()
             self.fail("did not get expected exception")

@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 #
 # Copyright 2014 Facebook
 #
@@ -16,22 +15,19 @@
 
 """A non-blocking TCP connection factory.
 """
-from __future__ import absolute_import, division, print_function
 
 import functools
 import socket
-import time
 import numbers
 import datetime
 
-from tornado.concurrent import Future
+from tornado.concurrent import Future, future_add_done_callback
 from tornado.ioloop import IOLoop
 from tornado.iostream import IOStream
 from tornado import gen
 from tornado.netutil import Resolver
 from tornado.platform.auto import set_close_exec
 from tornado.gen import TimeoutError
-from tornado.util import timedelta_to_seconds
 
 _INITIAL_CONNECT_TIMEOUT = 0.3
 
@@ -105,8 +101,8 @@ class _Connector(object):
             return
         stream, future = self.connect(af, addr)
         self.streams.add(stream)
-        future.add_done_callback(functools.partial(self.on_connect_done,
-                                                   addrs, af, addr))
+        future_add_done_callback(
+            future, functools.partial(self.on_connect_done, addrs, af, addr))
 
     def on_connect_done(self, addrs, af, addr, future):
         self.remaining -= 1
@@ -210,12 +206,15 @@ class TCPClient(object):
 
         .. versionchanged:: 4.5
            Added the ``source_ip`` and ``source_port`` arguments.
+
+        .. versionchanged:: 5.0
+           Added the ``timeout`` argument.
         """
         if timeout is not None:
             if isinstance(timeout, numbers.Real):
                 timeout = IOLoop.current().time() + timeout
             elif isinstance(timeout, datetime.timedelta):
-                timeout = IOLoop.current().time() + timedelta_to_seconds(timeout)
+                timeout = IOLoop.current().time() + timeout.total_seconds()
             else:
                 raise TypeError("Unsupported timeout %r" % timeout)
         if timeout is not None:

@@ -18,13 +18,14 @@ extensions = [
     "sphinx.ext.doctest",
     "sphinx.ext.intersphinx",
     "sphinx.ext.viewcode",
-    ]
+]
 
 primary_domain = 'py'
 default_role = 'py:obj'
 
 autodoc_member_order = "bysource"
 autoclass_content = "both"
+autodoc_inherit_docstrings = False
 
 # Without this line sphinx includes a copy of object.__init__'s docstring
 # on any class that doesn't define __init__.
@@ -36,17 +37,11 @@ coverage_ignore_modules = [
     "tornado.platform.asyncio",
     "tornado.platform.caresresolver",
     "tornado.platform.twisted",
-    ]
+]
 # I wish this could go in a per-module file...
 coverage_ignore_classes = [
-    # tornado.concurrent
-    "TracebackFuture",
-
     # tornado.gen
     "Runner",
-
-    # tornado.ioloop
-    "PollIOLoop",
 
     # tornado.web
     "ChunkedTransferEncoding",
@@ -59,7 +54,7 @@ coverage_ignore_classes = [
     "WebSocketProtocol",
     "WebSocketProtocol13",
     "WebSocketProtocol76",
-    ]
+]
 
 coverage_ignore_functions = [
     # various modules
@@ -79,11 +74,11 @@ html_favicon = 'favicon.ico'
 
 latex_documents = [
     ('index', 'tornado.tex', 'Tornado Documentation', 'The Tornado Authors', 'manual', False),
-    ]
+]
 
 intersphinx_mapping = {
-    'python': ('https://docs.python.org/3.5/', None),
-    }
+    'python': ('https://docs.python.org/3.6/', None),
+}
 
 on_rtd = os.environ.get('READTHEDOCS', None) == 'True'
 

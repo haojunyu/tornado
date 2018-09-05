@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 #
 # Copyright 2011 Facebook
 #
@@ -18,10 +17,9 @@
 the server into multiple processes and managing subprocesses.
 """
 
-from __future__ import absolute_import, division, print_function
-
 import errno
 import os
+import multiprocessing
 import signal
 import subprocess
 import sys
@@ -29,32 +27,15 @@ import time
 
 from binascii import hexlify
 
-from tornado.concurrent import Future
+from tornado.concurrent import Future, future_set_result_unless_cancelled
 from tornado import ioloop
 from tornado.iostream import PipeIOStream
 from tornado.log import gen_log
 from tornado.platform.auto import set_close_exec
-from tornado import stack_context
-from tornado.util import errno_from_exception, PY3
-
-try:
-    import multiprocessing
-except ImportError:
-    # Multiprocessing is not available on Google App Engine.
-    multiprocessing = None
-
-if PY3:
-    long = int
+from tornado.util import errno_from_exception
 
 # Re-export this exception for convenience.
-try:
-    CalledProcessError = subprocess.CalledProcessError
-except AttributeError:
-    # The subprocess module exists in Google App Engine, but is empty.
-    # This module isn't very useful in that case, but it should
-    # at least be importable.
-    if 'APPENGINE_RUNTIME' not in os.environ:
-        raise
+CalledProcessError = subprocess.CalledProcessError
 
 
 def cpu_count():
@@ -81,7 +62,7 @@ def _reseed_random():
     # random.seed (at least as of python 2.6).  If os.urandom is not
     # available, we mix in the pid in addition to a timestamp.
     try:
-        seed = long(hexlify(os.urandom(16)), 16)
+        seed = int(hexlify(os.urandom(16)), 16)
     except NotImplementedError:
         seed = int(time.time() * 1000) ^ os.getpid()
     random.seed(seed)
@@ -126,10 +107,6 @@ def fork_processes(num_processes, max_restarts=100):
     assert _task_id is None
     if num_processes is None or num_processes <= 0:
         num_processes = cpu_count()
-    if ioloop.IOLoop.initialized():
-        raise RuntimeError("Cannot run in multiple processes: IOLoop instance "
-                           "has already been initialized. You cannot call "
-                           "IOLoop.instance() before calling start_processes()")
     gen_log.info("Starting %d processes", num_processes)
     children = {}
 
@@ -199,7 +176,9 @@ class Subprocess(object):
 
     * ``stdin``, ``stdout``, and ``stderr`` may have the value
       ``tornado.process.Subprocess.STREAM``, which will make the corresponding
-      attribute of the resulting Subprocess a `.PipeIOStream`.
+      attribute of the resulting Subprocess a `.PipeIOStream`. If this option
+      is used, the caller is responsible for closing the streams when done
+      with them.
 
     The ``Subprocess.STREAM`` option and the ``set_exit_callback`` and
     ``wait_for_exit`` methods do not work on Windows. There is
@@ -268,7 +247,7 @@ class Subprocess(object):
         can be used as an alternative to an exit callback if the
         signal handler is causing a problem.
         """
-        self._exit_callback = stack_context.wrap(callback)
+        self._exit_callback = callback
         Subprocess.initialize()
         Subprocess._waiting[self.pid] = self
         Subprocess._try_cleanup_process(self.pid)
@@ -296,7 +275,7 @@ class Subprocess(object):
                 # Unfortunately we don't have the original args any more.
                 future.set_exception(CalledProcessError(ret, None))
             else:
-                future.set_result(ret)
+                future_set_result_unless_cancelled(future, ret)
         self.set_exit_callback(callback)
         return future
 
